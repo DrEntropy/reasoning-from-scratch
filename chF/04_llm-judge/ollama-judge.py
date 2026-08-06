@@ -64,7 +64,7 @@ def prepare_math500_pairs(math_items):
 
 def query_model(
     prompt,
-    model="gpt-oss:20b",
+    model="qwen3.6:35b-mlx",
     url="http://localhost:11434/api/chat",
     max_new_tokens=2048,
 ):
@@ -73,6 +73,10 @@ def query_model(
         "messages": [
             {"role": "user", "content": prompt}
         ],
+        # Qwen3.x thinking models otherwise spend num_predict on "thinking"
+        # and leave message.content empty, which makes parse_score fall back
+        # to its default score of 3.
+        "think": False,
         "options": {
             "seed": 123,
             "temperature": 0,
@@ -90,7 +94,8 @@ def query_model(
                 continue
             response_json = json.loads(line)
             if "message" in response_json:
-                response_data += response_json["message"]["content"]
+                msg = response_json["message"]
+                response_data += msg.get("content") or ""
 
     return response_data
 
@@ -120,14 +125,23 @@ def rubric_prompt(instruction, reference_answer, model_answer):
         f"Instruction:\n{instruction}\n\n"
         f"Reference Answer:\n{reference_answer}\n\n"
         f"Answer:\n{model_answer}\n\n"
+        f"Respond with only a single integer score from 1 to 5.\n"
         f"Evaluation: "
     )
     return prompt
 
 
 def parse_score(judge_text, default=3):
-    m = re.search(r"([1-5])(?:\D|$)", judge_text)
-    return int(m.group(1)) if m else int(default)
+    # Prefer an explicit "Score: N" style label when present.
+    m = re.search(r"(?i)\bscore\b\s*[:=]?\s*([1-5])\b", judge_text)
+    if m:
+        return int(m.group(1))
+
+    # Otherwise take the last standalone 1-5 digit. First-match is unsafe
+    # because justifications often quote answer numbers (e.g. "4") or
+    # restate rubric levels before giving the final score.
+    matches = re.findall(r"(?<!\d)([1-5])(?!\d)", judge_text)
+    return int(matches[-1]) if matches else int(default)
 
 
 def parse_args():
@@ -166,7 +180,7 @@ def parse_args():
     parser.add_argument(
         "--judge_model",
         type=str,
-        default="gpt-oss:20b",
+        default="qwen3.6:35b-mlx",
         help="Judge model name (Ollama). Used only for scoring",
     )
     return parser.parse_args()
@@ -242,7 +256,7 @@ if __name__ == "__main__":
             candidate_model, tokenizer, instruction, device, max_new_tokens
         ).strip()
 
-        # 2) Judge with rubric using gpt-oss:20b (or --judge_model) via Ollama
+        # 2) Judge with rubric using qwen3.6:35b-mlx (or --judge_model) via Ollama
         judge_in = rubric_prompt(instruction, reference, answer)
         judge_out = query_model(
             judge_in,
